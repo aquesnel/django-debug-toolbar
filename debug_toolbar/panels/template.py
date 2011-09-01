@@ -5,7 +5,7 @@ from django import http
 from django.conf import settings
 from django.core.signals import request_started
 from django.dispatch import Signal
-from django.template.context import get_standard_processors
+from django.template.context import get_standard_processors, Context
 from django.template.loader import render_to_string
 from django.test.signals import template_rendered
 from django.utils.translation import ugettext_lazy as _
@@ -87,29 +87,48 @@ class TemplateDebugPanel(DebugPanel):
             info['template'] = template
             # Clean up context for better readability
             if getattr(settings, 'DEBUG_TOOLBAR_CONFIG', {}).get('SHOW_TEMPLATE_CONTEXT', True):
-                context_data = template_data.get('context', None)
+                context_data = template_data.get('context', Context())
 
-                context_list = []
-                for context_layer in context_data.dicts:
-                    if hasattr(context_layer, 'items'):
-                        for key, value in context_layer.items():
-                            # Replace any request elements - they have a large
-                            # unicode representation and the request data is
-                            # already made available from the Request Vars panel.
-                            if isinstance(value, http.HttpRequest):
-                                context_layer[key] = '<<request>>'
-                            # Replace the debugging sql_queries element. The SQL
-                            # data is already made available from the SQL panel.
-                            elif key == 'sql_queries' and isinstance(value, list):
-                                context_layer[key] = '<<sql_queries>>'
-                            # Replace LANGUAGES, which is available in i18n context processor
-                            elif key == 'LANGUAGES' and isinstance(value, tuple):
-                                context_layer[key] = '<<languages>>'
-                    try:
-                        context_list.append(pformat(context_layer))
-                    except UnicodeEncodeError:
-                        pass
-                info['context'] = '\n'.join(context_list)
+                def flatten_context(context_data, depth = 0):
+                    if depth >= 10:
+                        return  {}
+                    
+                    flat_context = {}
+                    # Read the stack of dictionaries in reverse order so that 
+                    # the context layers on the top of the stack overwrite 
+                    # values in context layers at the botom of the stack. 
+                    for context_layer in context_data.dicts[::-1]:
+                        if isinstance(context_layer, Context):
+                            # for Context and RequestContext objects that may be 
+                            # included in the context_data.dicts stack, we just 
+                            # want to flatten all the dicts in that context layer. 
+                            flat_context.update(flatten_context(context_layer, depth + 1))
+                        elif hasattr(context_layer, 'items'):
+                            flat_context.update(context_layer)
+                        else:
+                            raise NotImplementedError("Received a context_layer that is not either a Context or a dictionary like object (supports the 'items' method)")
+                            
+                    return flat_context
+                final_context = flatten_context(context_data)
+                
+                # Replace any request elements - they have a large
+                # unicode representation and the request data is
+                # already made available from the Request Vars panel.
+                if final_context.has_key('request'):
+                    final_context['request'] = '<<request>> (see the Request Vars panel)'
+                # Replace the debugging sql_queries element. The SQL
+                # data is already made available from the SQL panel.
+                if final_context.has_key('sql_queries'):
+                    final_context['sql_queries'] = '<<sql_queries>> (see the SQL panel)'
+                # Replace LANGUAGES, which is available in i18n context processor
+                if final_context.has_key('LANGUAGES'):
+                    final_context['LANGUAGES'] = '<<languages>> (see the i18n context processor)'
+                
+                try:
+                    info['context'] = pformat(final_context)
+                except UnicodeEncodeError:
+                    info['context'] = 'Unicode encoding error for template contextes'
+                                
             template_context.append(info)
 
         context = self.context.copy()
